@@ -230,9 +230,11 @@ with col2:
             with st.spinner("正在翻译..."):
                 trans_text = call_translation_api(api_key, prompt_input)
                 if trans_text:
-                    # 修复：同时更新 prompt_text 和 input_prompt (强制刷新组件显示)
+                    # 1. 更新默认值源
                     st.session_state.prompt_text = trans_text
-                    st.session_state.input_prompt = trans_text
+                    # 2. 删除组件的旧状态，强制它使用新值重新初始化
+                    if "input_prompt" in st.session_state:
+                        del st.session_state["input_prompt"]
                     st.rerun() 
 
 # 生成按钮
