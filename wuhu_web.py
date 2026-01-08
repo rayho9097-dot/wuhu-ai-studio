@@ -1,5 +1,5 @@
 import streamlit as st
-import streamlit.components.v1 as components  # 新增：用于执行自动下载的JS
+import streamlit.components.v1 as components
 import requests
 import base64
 import json
@@ -31,7 +31,7 @@ RATIO_MAP = {
     "9:16 (竖屏 Portrait)": "9:16"
 }
 
-# --- 初始化 Session State (历史记录核心) ---
+# --- 初始化 Session State ---
 if 'prompt_text' not in st.session_state:
     st.session_state.prompt_text = "一只在太空中吃香蕉的纳米猴子"
 
@@ -47,30 +47,19 @@ def process_uploaded_images(uploaded_files):
     if not uploaded_files:
         return []
 
-    # 限制最多4张
     files_to_process = uploaded_files[:4]
     
     for uploaded_file in files_to_process:
         try:
             image = Image.open(uploaded_file)
-            
-            # 修正模式 (RGBA -> RGB)
             if image.mode in ("RGBA", "P"):
                 image = image.convert("RGB")
-            
-            # 缩放限制
             image.thumbnail((1024, 1024))
-            
-            # 转字节流 (JPEG 压缩)
             buffered = BytesIO()
             image.save(buffered, format="JPEG", quality=85)
-            
-            # Base64 编码
             img_str = base64.b64encode(buffered.getvalue()).decode('utf-8')
             full_b64 = f"data:image/jpeg;base64,{img_str}"
-            
             processed_images.append(full_b64)
-            
         except Exception as e:
             st.error(f"图片处理失败 {uploaded_file.name}: {e}")
             
@@ -98,10 +87,8 @@ def call_translation_api(api_key, text):
             data = response.json()
             return data.get('choices', [{}])[0].get('message', {}).get('content', '').strip()
         else:
-            st.error(f"翻译失败: {response.status_code} - {response.text}")
             return None
     except Exception as e:
-        st.error(f"翻译出错: {e}")
         return None
 
 def generate_image(api_key, prompt, base64_imgs, model_id, ratio):
@@ -129,8 +116,6 @@ def generate_image(api_key, prompt, base64_imgs, model_id, ratio):
         if response.status_code == 200:
             data = response.json()
             content = data.get('choices', [{}])[0].get('message', {}).get('content', '')
-            
-            # 提取 URL (Markdown 或 纯链接)
             import re
             match = re.search(r'!\[.*?\]\((.*?)\)', content)
             if match:
@@ -145,16 +130,12 @@ def generate_image(api_key, prompt, base64_imgs, model_id, ratio):
         return f"Exception: {str(e)}"
 
 def trigger_auto_download(image_url, index):
-    """
-    后台下载图片并触发浏览器自动下载
-    """
+    """后台下载图片并触发浏览器自动下载"""
     try:
         r = requests.get(image_url)
         if r.status_code == 200:
             b64_data = base64.b64encode(r.content).decode()
             filename = f"wuhu_gen_{int(time.time())}_{index+1}.png"
-            
-            # 使用 JavaScript 触发下载
             js_code = f"""
                 <script>
                 (function() {{
@@ -168,17 +149,42 @@ def trigger_auto_download(image_url, index):
                 }})();
                 </script>
             """
-            # height=0 隐藏该组件
             components.html(js_code, height=0)
     except Exception as e:
         st.toast(f"自动下载失败: {e}", icon="⚠️")
+
+# --- 回调函数 (修复报错的关键) ---
+def handle_translation():
+    # 从 Session State 获取输入框的值
+    current_key = st.session_state.get("sidebar_api_key")
+    current_text = st.session_state.get("input_prompt")
+    
+    if not current_key:
+        st.toast("请先在左侧输入 API Key", icon="⚠️")
+        return
+        
+    if not current_text:
+        st.toast("提示词为空", icon="⚠️")
+        return
+
+    # 执行翻译
+    trans_text = call_translation_api(current_key, current_text)
+    
+    if trans_text:
+        # 在回调中直接修改 Session State 是安全的，因为组件还没重新渲染
+        st.session_state.input_prompt = trans_text
+        st.session_state.prompt_text = trans_text
+        st.toast("翻译成功！", icon="✅")
+    else:
+        st.toast("翻译失败，请检查网络或 Key", icon="❌")
 
 # --- 侧边栏 UI ---
 with st.sidebar:
     st.title("🎛️ 设置面板")
     
     st.markdown("### 1. 连接设置")
-    api_key = st.text_input("API Key", type="password", placeholder="sk-...", help="请输入您的 API Key")
+    # 给 API Key 加上 key 参数，方便在回调中获取
+    api_key = st.text_input("API Key", type="password", placeholder="sk-...", help="请输入您的 API Key", key="sidebar_api_key")
     
     st.markdown("---")
     st.markdown("### 2. 参考图片")
@@ -188,7 +194,6 @@ with st.sidebar:
         accept_multiple_files=True
     )
     
-    # 预览上传的图片
     if uploaded_files:
         st.caption(f"已选择 {len(uploaded_files)}/4 张")
         cols = st.columns(2)
@@ -202,11 +207,9 @@ with st.sidebar:
     ratio_name = st.selectbox("图片比例", list(RATIO_MAP.keys()))
     image_count = st.slider("生成张数", min_value=1, max_value=8, value=1)
     
-    # 新增：自动下载开关
     auto_dl = st.checkbox("生成后自动下载图片", value=True)
     
     st.markdown("---")
-    # 添加一个清除历史记录的按钮
     if st.button("🗑️ 清除历史记录"):
         st.session_state.history = []
         st.rerun()
@@ -215,27 +218,15 @@ with st.sidebar:
 st.title("WUHU AI Studio 🎨")
 st.markdown("专业的 AI 绘图工作台")
 
-# 提示词区域
 col1, col2 = st.columns([4, 1])
 with col1:
-    # 注意：key="input_prompt" 绑定了 session_state
+    # 绑定 input_prompt 到 session_state
     prompt_input = st.text_area("提示词 / Prompt", value=st.session_state.prompt_text, height=150, key="input_prompt")
 with col2:
-    st.write("") # Spacer
-    st.write("") # Spacer
-    if st.button("🌐 翻译成英文", use_container_width=True):
-        if not api_key:
-            st.warning("请先在左侧输入 API Key")
-        else:
-            with st.spinner("正在翻译..."):
-                trans_text = call_translation_api(api_key, prompt_input)
-                if trans_text:
-                    # 1. 更新默认值源
-                    st.session_state.prompt_text = trans_text
-                    # 2. 删除组件的旧状态，强制它使用新值重新初始化
-                    if "input_prompt" in st.session_state:
-                        del st.session_state["input_prompt"]
-                    st.rerun() 
+    st.write("") 
+    st.write("") 
+    # 使用回调函数 on_click
+    st.button("🌐 翻译成英文", use_container_width=True, on_click=handle_translation)
 
 # 生成按钮
 if st.button("✨ 开始生成 / Generate", type="primary", use_container_width=True):
@@ -244,48 +235,35 @@ if st.button("✨ 开始生成 / Generate", type="primary", use_container_width=
     elif not uploaded_files:
         st.error("❌ 错误：请至少上传一张参考图片")
     else:
-        # 准备数据
         base64_imgs = process_uploaded_images(uploaded_files)
         selected_model = MODEL_MAP[model_name]
         selected_ratio = RATIO_MAP[ratio_name]
         
-        # 创建结果展示区
         result_container = st.container()
         
         with result_container:
             st.divider()
             st.subheader("🚀 正在生成...")
-            
-            # 使用列来展示结果，每行显示2张
             result_cols = st.columns(2)
-            
-            # 进度指示器
             progress_bar = st.progress(0)
             status_text = st.empty()
             
             for i in range(image_count):
                 status_text.text(f"正在生成第 {i+1} / {image_count} 张图片... (排队中)")
-                
-                # 延时策略
                 if i > 0:
                     time.sleep(2)
                 
-                # 调用 API
                 img_result = generate_image(api_key, prompt_input, base64_imgs, selected_model, selected_ratio)
-                
-                # 显示结果
-                target_col = result_cols[i % 2] # 左右交替显示
+                target_col = result_cols[i % 2]
                 
                 if img_result and img_result.startswith("http"):
                     target_col.success(f"图片 #{i+1} 生成成功")
                     target_col.image(img_result, use_container_width=True)
                     target_col.markdown(f"[📥 手动下载]({img_result})")
                     
-                    # --- 自动下载逻辑 ---
                     if auto_dl:
                         trigger_auto_download(img_result, i)
                     
-                    # --- 存入历史记录 ---
                     timestamp = datetime.now().strftime("%H:%M:%S")
                     st.session_state.history.append({
                         "url": img_result,
@@ -298,13 +276,11 @@ if st.button("✨ 开始生成 / Generate", type="primary", use_container_width=
                     target_col.error(f"图片 #{i+1} 生成失败")
                     target_col.code(img_result)
                 
-                # 更新进度条
                 progress_bar.progress((i + 1) / image_count)
 
             status_text.text("✅ 所有任务已完成！")
             progress_bar.empty()
             time.sleep(1)
-            # st.rerun() # 移除强制刷新，以免打断自动下载的执行
 
 # --- 历史记录展示区 ---
 if st.session_state.history:
@@ -312,10 +288,7 @@ if st.session_state.history:
     st.subheader(f"🕒 历史记录 (本次会话: {len(st.session_state.history)} 张)")
     st.caption("注意：刷新网页后历史记录将会清空，请及时保存图片。")
     
-    # 倒序展示，最新的在最前面
     reversed_history = st.session_state.history[::-1]
-    
-    # 每行显示 3 张
     hist_cols = st.columns(3)
     for i, item in enumerate(reversed_history):
         col = hist_cols[i % 3]
