@@ -38,6 +38,10 @@ if 'prompt_text' not in st.session_state:
 if 'history' not in st.session_state:
     st.session_state.history = []
 
+# --- 1. 读取 URL 中的 API Key (记忆功能) ---
+if "api_key" in st.query_params and "sidebar_api_key" not in st.session_state:
+    st.session_state.sidebar_api_key = st.query_params["api_key"]
+
 # --- 核心功能函数 ---
 
 def process_uploaded_images(uploaded_files):
@@ -112,7 +116,14 @@ def generate_image(api_key, prompt, base64_imgs, model_id, ratio):
     }
     
     try:
-        response = requests.post(url, json=payload, headers=headers)
+        # 设置更长的客户端超时时间 (200秒)，防止客户端先断开
+        response = requests.post(url, json=payload, headers=headers, timeout=200)
+        
+        # 1. 处理 524 超时 (Cloudflare Timeout)
+        if response.status_code == 524:
+            return "⏱️ 生成超时 (Error 524): 服务端生成时间过长 (>100s)。后台可能已扣费，但连接被切断无法获取图片。建议切换至【极速版 (Flash)】模型。"
+            
+        # 2. 处理正常成功
         if response.status_code == 200:
             data = response.json()
             content = data.get('choices', [{}])[0].get('message', {}).get('content', '')
@@ -124,8 +135,21 @@ def generate_image(api_key, prompt, base64_imgs, model_id, ratio):
                 return content.split()[0]
             else:
                 return None
+                
+        # 3. 处理其他错误 (解析 JSON 避免显示 HTML 源码)
         else:
-            return f"Error {response.status_code}: {response.text[:100]}"
+            try:
+                err_data = response.json()
+                # 尝试提取具体的错误信息
+                if "error" in err_data and "message" in err_data["error"]:
+                    return f"Error {response.status_code}: {err_data['error']['message']}"
+                return f"Error {response.status_code}: {json.dumps(err_data)}"
+            except:
+                # 如果不是 JSON (比如 HTML 错误页)，只截取前 100 字符避免刷屏
+                return f"Error {response.status_code}: {response.text[:200]}..."
+                
+    except requests.exceptions.Timeout:
+        return "⏱️ 请求超时: 本地网络连接 API 超时，请检查网络。"
     except Exception as e:
         return f"Exception: {str(e)}"
 
@@ -153,9 +177,8 @@ def trigger_auto_download(image_url, index):
     except Exception as e:
         st.toast(f"自动下载失败: {e}", icon="⚠️")
 
-# --- 回调函数 (修复报错的关键) ---
+# --- 回调函数 ---
 def handle_translation():
-    # 从 Session State 获取输入框的值
     current_key = st.session_state.get("sidebar_api_key")
     current_text = st.session_state.get("input_prompt")
     
@@ -167,24 +190,46 @@ def handle_translation():
         st.toast("提示词为空", icon="⚠️")
         return
 
-    # 执行翻译
     trans_text = call_translation_api(current_key, current_text)
     
     if trans_text:
-        # 在回调中直接修改 Session State 是安全的，因为组件还没重新渲染
         st.session_state.input_prompt = trans_text
         st.session_state.prompt_text = trans_text
         st.toast("翻译成功！", icon="✅")
     else:
         st.toast("翻译失败，请检查网络或 Key", icon="❌")
 
+def update_url_key():
+    remember = st.session_state.get("remember_key", False)
+    current_key = st.session_state.get("sidebar_api_key", "")
+    
+    if remember and current_key:
+        st.query_params["api_key"] = current_key
+    else:
+        if "api_key" in st.query_params:
+            del st.query_params["api_key"]
+
 # --- 侧边栏 UI ---
 with st.sidebar:
     st.title("🎛️ 设置面板")
     
     st.markdown("### 1. 连接设置")
-    # 给 API Key 加上 key 参数，方便在回调中获取
-    api_key = st.text_input("API Key", type="password", placeholder="sk-...", help="请输入您的 API Key", key="sidebar_api_key")
+    api_key = st.text_input(
+        "API Key", 
+        type="password", 
+        placeholder="sk-...", 
+        help="请输入您的 API Key", 
+        key="sidebar_api_key",
+        on_change=update_url_key
+    )
+    
+    st.checkbox(
+        "记住 API Key (保存到网址)", 
+        help="勾选后 Key 会出现在浏览器地址栏中，您可以收藏该网址以便下次直接登录。请勿在公共电脑使用！",
+        key="remember_key",
+        value=("api_key" in st.query_params),
+        on_change=update_url_key
+    )
     
     st.markdown("---")
     st.markdown("### 2. 参考图片")
@@ -220,12 +265,10 @@ st.markdown("专业的 AI 绘图工作台")
 
 col1, col2 = st.columns([4, 1])
 with col1:
-    # 绑定 input_prompt 到 session_state
     prompt_input = st.text_area("提示词 / Prompt", value=st.session_state.prompt_text, height=150, key="input_prompt")
 with col2:
     st.write("") 
     st.write("") 
-    # 使用回调函数 on_click
     st.button("🌐 翻译成英文", use_container_width=True, on_click=handle_translation)
 
 # 生成按钮
@@ -274,7 +317,8 @@ if st.button("✨ 开始生成 / Generate", type="primary", use_container_width=
                     })
                 else:
                     target_col.error(f"图片 #{i+1} 生成失败")
-                    target_col.code(img_result)
+                    # 如果包含 Error 524，这里会显示清晰的中文提示
+                    target_col.warning(img_result) 
                 
                 progress_bar.progress((i + 1) / image_count)
 
