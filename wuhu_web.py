@@ -1,10 +1,12 @@
 import streamlit as st
+import streamlit.components.v1 as components  # 新增：用于执行自动下载的JS
 import requests
 import base64
 import json
 import time
 from PIL import Image
 from io import BytesIO
+from datetime import datetime
 
 # --- 页面基础配置 ---
 st.set_page_config(
@@ -28,6 +30,13 @@ RATIO_MAP = {
     "3:4 (竖屏 Portrait)": "3:4",
     "9:16 (竖屏 Portrait)": "9:16"
 }
+
+# --- 初始化 Session State (历史记录核心) ---
+if 'prompt_text' not in st.session_state:
+    st.session_state.prompt_text = "一只在太空中吃香蕉的纳米猴子"
+
+if 'history' not in st.session_state:
+    st.session_state.history = []
 
 # --- 核心功能函数 ---
 
@@ -135,6 +144,35 @@ def generate_image(api_key, prompt, base64_imgs, model_id, ratio):
     except Exception as e:
         return f"Exception: {str(e)}"
 
+def trigger_auto_download(image_url, index):
+    """
+    后台下载图片并触发浏览器自动下载
+    """
+    try:
+        r = requests.get(image_url)
+        if r.status_code == 200:
+            b64_data = base64.b64encode(r.content).decode()
+            filename = f"wuhu_gen_{int(time.time())}_{index+1}.png"
+            
+            # 使用 JavaScript 触发下载
+            js_code = f"""
+                <script>
+                (function() {{
+                    var a = document.createElement('a');
+                    a.href = "data:image/png;base64,{b64_data}";
+                    a.download = "{filename}";
+                    a.style.display = 'none';
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                }})();
+                </script>
+            """
+            # height=0 隐藏该组件
+            components.html(js_code, height=0)
+    except Exception as e:
+        st.toast(f"自动下载失败: {e}", icon="⚠️")
+
 # --- 侧边栏 UI ---
 with st.sidebar:
     st.title("🎛️ 设置面板")
@@ -163,18 +201,24 @@ with st.sidebar:
     model_name = st.selectbox("选择模型", list(MODEL_MAP.keys()))
     ratio_name = st.selectbox("图片比例", list(RATIO_MAP.keys()))
     image_count = st.slider("生成张数", min_value=1, max_value=8, value=1)
+    
+    # 新增：自动下载开关
+    auto_dl = st.checkbox("生成后自动下载图片", value=True)
+    
+    st.markdown("---")
+    # 添加一个清除历史记录的按钮
+    if st.button("🗑️ 清除历史记录"):
+        st.session_state.history = []
+        st.rerun()
 
 # --- 主界面 UI ---
 st.title("WUHU AI Studio 🎨")
 st.markdown("专业的 AI 绘图工作台")
 
-# 初始化 session state 用于存储提示词
-if 'prompt_text' not in st.session_state:
-    st.session_state.prompt_text = "一只在太空中吃香蕉的纳米猴子"
-
 # 提示词区域
 col1, col2 = st.columns([4, 1])
 with col1:
+    # 注意：key="input_prompt" 绑定了 session_state
     prompt_input = st.text_area("提示词 / Prompt", value=st.session_state.prompt_text, height=150, key="input_prompt")
 with col2:
     st.write("") # Spacer
@@ -186,8 +230,10 @@ with col2:
             with st.spinner("正在翻译..."):
                 trans_text = call_translation_api(api_key, prompt_input)
                 if trans_text:
+                    # 修复：同时更新 prompt_text 和 input_prompt (强制刷新组件显示)
                     st.session_state.prompt_text = trans_text
-                    st.rerun() # 刷新页面以更新文本框
+                    st.session_state.input_prompt = trans_text
+                    st.rerun() 
 
 # 生成按钮
 if st.button("✨ 开始生成 / Generate", type="primary", use_container_width=True):
@@ -206,7 +252,7 @@ if st.button("✨ 开始生成 / Generate", type="primary", use_container_width=
         
         with result_container:
             st.divider()
-            st.subheader("生成结果")
+            st.subheader("🚀 正在生成...")
             
             # 使用列来展示结果，每行显示2张
             result_cols = st.columns(2)
@@ -231,8 +277,21 @@ if st.button("✨ 开始生成 / Generate", type="primary", use_container_width=
                 if img_result and img_result.startswith("http"):
                     target_col.success(f"图片 #{i+1} 生成成功")
                     target_col.image(img_result, use_container_width=True)
-                    # 提供下载链接模拟
-                    target_col.markdown(f"[📥 点击下载原图]({img_result})")
+                    target_col.markdown(f"[📥 手动下载]({img_result})")
+                    
+                    # --- 自动下载逻辑 ---
+                    if auto_dl:
+                        trigger_auto_download(img_result, i)
+                    
+                    # --- 存入历史记录 ---
+                    timestamp = datetime.now().strftime("%H:%M:%S")
+                    st.session_state.history.append({
+                        "url": img_result,
+                        "prompt": prompt_input,
+                        "time": timestamp,
+                        "model": model_name,
+                        "ratio": ratio_name
+                    })
                 else:
                     target_col.error(f"图片 #{i+1} 生成失败")
                     target_col.code(img_result)
@@ -242,7 +301,28 @@ if st.button("✨ 开始生成 / Generate", type="primary", use_container_width=
 
             status_text.text("✅ 所有任务已完成！")
             progress_bar.empty()
+            time.sleep(1)
+            # st.rerun() # 移除强制刷新，以免打断自动下载的执行
 
-# 页脚
-st.markdown("---")
-st.markdown("© 2025 WUHU AI Studio | Powered by Gemini Pro Vision")
+# --- 历史记录展示区 ---
+if st.session_state.history:
+    st.divider()
+    st.subheader(f"🕒 历史记录 (本次会话: {len(st.session_state.history)} 张)")
+    st.caption("注意：刷新网页后历史记录将会清空，请及时保存图片。")
+    
+    # 倒序展示，最新的在最前面
+    reversed_history = st.session_state.history[::-1]
+    
+    # 每行显示 3 张
+    hist_cols = st.columns(3)
+    for i, item in enumerate(reversed_history):
+        col = hist_cols[i % 3]
+        with col:
+            with st.container(border=True):
+                st.image(item['url'], use_container_width=True)
+                st.markdown(f"**时间**: {item['time']}")
+                with st.expander("查看详情"):
+                    st.text(f"模型: {item['model']}")
+                    st.text(f"比例: {item['ratio']}")
+                    st.text_area("提示词", item['prompt'], height=70, disabled=True)
+                st.markdown(f"[📥 下载]({item['url']})")
