@@ -75,7 +75,7 @@ def call_translation_api(api_key, text):
         "messages": [
             {
                 "role": "system", 
-                "content": "You are a professional prompt engineer translator. Translate the following Chinese text into detailed English image generation prompts. Only output the translated English text, no explanations."
+                "content": "You are a precise translator. Translate the following Chinese text directly into English. Do not add, omit, or modify any meaning. Do not expand into a detailed prompt. Only output the translated English text."
             },
             {"role": "user", "content": text}
         ]
